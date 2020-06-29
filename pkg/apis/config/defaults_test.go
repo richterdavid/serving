@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"knative.dev/pkg/apis"
+	"knative.dev/pkg/ptr"
 	"knative.dev/pkg/system"
 
 	. "knative.dev/pkg/configmap/testing"
@@ -48,6 +49,7 @@ func TestDefaultsConfigurationFromFile(t *testing.T) {
 	// So for this test we ignore those, but verify the other fields.
 	got.RevisionCPULimit, got.RevisionCPURequest = nil, nil
 	got.RevisionMemoryLimit, got.RevisionMemoryRequest = nil, nil
+	got.RevisionEphemeralStorageLimit, got.RevisionEphemeralStorageRequest = nil, nil
 	want := defaultDefaultsConfig()
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Error("Example does not represent default config: diff(-want,+got)\n", diff)
@@ -76,6 +78,7 @@ func TestDefaultsConfiguration(t *testing.T) {
 			ContainerConcurrencyMaxLimit: 1984,
 			RevisionCPURequest:           &oneTwoThree,
 			UserContainerNameTemplate:    "{{.Name}}",
+			EnableServiceLinks:           ptr.Bool(true),
 		},
 		data: map[string]string{
 			"revision-timeout-seconds":         "123",
@@ -84,19 +87,21 @@ func TestDefaultsConfiguration(t *testing.T) {
 			"container-concurrency-max-limit":  "1984",
 			"container-name-template":          "{{.Name}}",
 			"allow-container-concurrency-zero": "false",
+			"enable-service-links":             "true",
 		},
 	}, {
-		name:    "invalid multi container flag value",
+		name:    "service links false",
 		wantErr: false,
 		wantDefaults: &Defaults{
 			RevisionTimeoutSeconds:        DefaultRevisionTimeoutSeconds,
 			MaxRevisionTimeoutSeconds:     DefaultMaxRevisionTimeoutSeconds,
 			UserContainerNameTemplate:     DefaultUserContainerName,
 			ContainerConcurrencyMaxLimit:  DefaultMaxRevisionContainerConcurrency,
-			AllowContainerConcurrencyZero: DefaultAllowContainerConcurrencyZero,
+			AllowContainerConcurrencyZero: true,
+			EnableServiceLinks:            ptr.Bool(false),
 		},
 		data: map[string]string{
-			"enable-multi-container": "invalid",
+			"enable-service-links": "false",
 		},
 	}, {
 		name:    "invalid allow container concurrency zero flag value",

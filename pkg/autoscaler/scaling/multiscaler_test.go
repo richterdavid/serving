@@ -354,7 +354,6 @@ func TestMultiScalerScaleFromZero(t *testing.T) {
 	}
 
 	testStat := metrics.Stat{
-		Time:                      time.Now(),
 		PodName:                   "test-pod",
 		AverageConcurrentRequests: 1,
 		RequestCount:              1,
@@ -435,12 +434,6 @@ func (u *fakeUniScaler) Scale(context.Context, time.Time) ScaleResult {
 	return ScaleResult{u.replicas, u.surplus, u.numActivators, u.scaled}
 }
 
-func (u *fakeUniScaler) getScaleCount() int {
-	u.mutex.RLock()
-	defer u.mutex.RUnlock()
-	return u.scaleCount
-}
-
 func (u *fakeUniScaler) setScaleResult(replicas, surplus, na int32, scaled bool) {
 	u.mutex.Lock()
 	defer u.mutex.Unlock()
@@ -458,8 +451,8 @@ func (u *fakeUniScaler) Update(*DeciderSpec) error {
 func newDecider() *Decider {
 	return &Decider{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: fake.TestNamespace,
-			Name:      fake.TestRevision,
+			Namespace: "a-ns",
+			Name:      "a-rev",
 		},
 		Spec: DeciderSpec{
 			TargetValue: 1,

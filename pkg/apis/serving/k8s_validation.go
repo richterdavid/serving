@@ -28,10 +28,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"knative.dev/networking/pkg/apis/networking"
 	"knative.dev/pkg/apis"
 	"knative.dev/pkg/profiling"
 	"knative.dev/serving/pkg/apis/config"
-	"knative.dev/serving/pkg/apis/networking"
 )
 
 const (
@@ -59,6 +59,8 @@ var (
 		"K_CONFIGURATION",
 		"K_REVISION",
 	)
+
+	reservedSidecarEnvVars = reservedEnvVars.Difference(sets.NewString("PORT"))
 
 	// The port is named "user-port" on the deployment, but a user cannot set an arbitrary name on the port
 	// in Configuration. The name field is reserved for content-negotiation. Currently 'h2c' and 'http1' are
@@ -181,32 +183,41 @@ func validateKeyToPath(k2p corev1.KeyToPath) *apis.FieldError {
 	return errs
 }
 
-func validateEnvValueFrom(source *corev1.EnvVarSource) *apis.FieldError {
+func validateEnvValueFrom(ctx context.Context, source *corev1.EnvVarSource) *apis.FieldError {
 	if source == nil {
 		return nil
 	}
-	return apis.CheckDisallowedFields(*source, *EnvVarSourceMask(source))
+	features := config.FromContextOrDefaults(ctx).Features
+	return apis.CheckDisallowedFields(*source, *EnvVarSourceMask(source, features.PodSpecFieldRef != config.Disabled))
 }
 
-func validateEnvVar(env corev1.EnvVar) *apis.FieldError {
+func getReservedEnvVarsPerContainerType(ctx context.Context) sets.String {
+	if IsInSidecarContainer(ctx) {
+		return reservedSidecarEnvVars
+	} else {
+		return reservedEnvVars
+	}
+}
+
+func validateEnvVar(ctx context.Context, env corev1.EnvVar) *apis.FieldError {
 	errs := apis.CheckDisallowedFields(env, *EnvVarMask(&env))
 
 	if env.Name == "" {
 		errs = errs.Also(apis.ErrMissingField("name"))
-	} else if reservedEnvVars.Has(env.Name) {
+	} else if getReservedEnvVarsPerContainerType(ctx).Has(env.Name) {
 		errs = errs.Also(&apis.FieldError{
 			Message: fmt.Sprintf("%q is a reserved environment variable", env.Name),
 			Paths:   []string{"name"},
 		})
 	}
 
-	return errs.Also(validateEnvValueFrom(env.ValueFrom).ViaField("valueFrom"))
+	return errs.Also(validateEnvValueFrom(ctx, env.ValueFrom).ViaField("valueFrom"))
 }
 
-func validateEnv(envVars []corev1.EnvVar) *apis.FieldError {
+func validateEnv(ctx context.Context, envVars []corev1.EnvVar) *apis.FieldError {
 	var errs *apis.FieldError
 	for i, env := range envVars {
-		errs = errs.Also(validateEnvVar(env).ViaIndex(i))
+		errs = errs.Also(validateEnvVar(ctx, env).ViaIndex(i))
 	}
 	return errs
 }
@@ -257,7 +268,7 @@ func ValidatePodSpec(ctx context.Context, ps corev1.PodSpec) *apis.FieldError {
 	case 0:
 		errs = errs.Also(apis.ErrMissingField("containers"))
 	case 1:
-		errs = errs.Also(ValidateContainer(ps.Containers[0], volumes).
+		errs = errs.Also(ValidateContainer(ctx, ps.Containers[0], volumes).
 			ViaFieldIndex("containers", 0))
 	default:
 		errs = errs.Also(validateContainers(ctx, ps.Containers, volumes))
@@ -282,9 +293,9 @@ func validateContainers(ctx context.Context, containers []corev1.Container, volu
 			// Probes are not allowed on other than serving container,
 			// ref: http://bit.ly/probes-condition
 			if len(containers[i].Ports) == 0 {
-				errs = errs.Also(validateSidecarContainer(containers[i], volumes).ViaFieldIndex("containers", i))
+				errs = errs.Also(validateSidecarContainer(WithinSidecarContainer(ctx), containers[i], volumes).ViaFieldIndex("containers", i))
 			} else {
-				errs = errs.Also(ValidateContainer(containers[i], volumes).ViaFieldIndex("containers", i))
+				errs = errs.Also(ValidateContainer(WithinUserContainer(ctx), containers[i], volumes).ViaFieldIndex("containers", i))
 			}
 		}
 	}
@@ -309,7 +320,7 @@ func validateContainersPorts(containers []corev1.Container) *apis.FieldError {
 }
 
 // validateSidecarContainer validate fields for non serving containers
-func validateSidecarContainer(container corev1.Container, volumes sets.String) *apis.FieldError {
+func validateSidecarContainer(ctx context.Context, container corev1.Container, volumes sets.String) *apis.FieldError {
 	var errs *apis.FieldError
 	if container.LivenessProbe != nil {
 		errs = errs.Also(apis.CheckDisallowedFields(*container.LivenessProbe,
@@ -319,11 +330,11 @@ func validateSidecarContainer(container corev1.Container, volumes sets.String) *
 		errs = errs.Also(apis.CheckDisallowedFields(*container.ReadinessProbe,
 			*ProbeMask(&corev1.Probe{})).ViaField("readinessProbe"))
 	}
-	return errs.Also(validate(container, volumes))
+	return errs.Also(validate(ctx, container, volumes))
 }
 
 // ValidateContainer validate fields for serving containers
-func ValidateContainer(container corev1.Container, volumes sets.String) *apis.FieldError {
+func ValidateContainer(ctx context.Context, container corev1.Container, volumes sets.String) *apis.FieldError {
 	var errs *apis.FieldError
 	// Single container cannot have multiple ports
 	errs = errs.Also(portValidation(container.Ports).ViaField("ports"))
@@ -331,7 +342,7 @@ func ValidateContainer(container corev1.Container, volumes sets.String) *apis.Fi
 	errs = errs.Also(validateProbe(container.LivenessProbe).ViaField("livenessProbe"))
 	// Readiness Probes
 	errs = errs.Also(validateReadinessProbe(container.ReadinessProbe).ViaField("readinessProbe"))
-	return errs.Also(validate(container, volumes))
+	return errs.Also(validate(ctx, container, volumes))
 }
 
 func portValidation(containerPorts []corev1.ContainerPort) *apis.FieldError {
@@ -345,7 +356,7 @@ func portValidation(containerPorts []corev1.ContainerPort) *apis.FieldError {
 	return nil
 }
 
-func validate(container corev1.Container, volumes sets.String) *apis.FieldError {
+func validate(ctx context.Context, container corev1.Container, volumes sets.String) *apis.FieldError {
 	if equality.Semantic.DeepEqual(container, corev1.Container{}) {
 		return apis.ErrMissingField(apis.CurrentField)
 	}
@@ -360,7 +371,7 @@ func validate(container corev1.Container, volumes sets.String) *apis.FieldError 
 	}
 
 	// Env
-	errs = errs.Also(validateEnv(container.Env).ViaField("env"))
+	errs = errs.Also(validateEnv(ctx, container.Env).ViaField("env"))
 	// EnvFrom
 	errs = errs.Also(validateEnvFrom(container.EnvFrom).ViaField("envFrom"))
 	// Image
@@ -607,4 +618,29 @@ func ValidateNamespacedObjectReference(p *corev1.ObjectReference) *apis.FieldErr
 		errs = errs.Also(apis.ErrInvalidValue(strings.Join(verrs, ", "), "name"))
 	}
 	return errs
+}
+
+// This is attached to contexts as they are passed down through a user container
+// being validated.
+type userContainer struct{}
+
+// WithUserContainer notes on the context that further validation or defaulting
+// is within the context of a user container in the revision.
+func WithinUserContainer(ctx context.Context) context.Context {
+	return context.WithValue(ctx, userContainer{}, struct{}{})
+}
+
+// This is attached to contexts as they are passed down through a sidecar container
+// being validated.
+type sidecarContainer struct{}
+
+// WithinSidecatrContainer notes on the context that further validation or defaulting
+// is within the context of a sidecar container in the revision.
+func WithinSidecarContainer(ctx context.Context) context.Context {
+	return context.WithValue(ctx, sidecarContainer{}, struct{}{})
+}
+
+// Check if we are in the context of a sidecar container in the revision.
+func IsInSidecarContainer(ctx context.Context) bool {
+	return ctx.Value(sidecarContainer{}) != nil
 }
